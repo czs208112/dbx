@@ -1,4 +1,5 @@
-import type { ObjectInfo } from "@/types/database";
+import type { ObjectInfo, TreeNodeType } from "@/types/database";
+import type { PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
@@ -25,6 +26,50 @@ export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalByt
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
+
+export type ObjectBrowserPinnedTreeNodeContext = {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+};
+
+export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): TreeNodeType {
+  if (type === "TABLE") return "table";
+  if (type === "VIEW") return "view";
+  if (type === "MATERIALIZED_VIEW") return "materialized_view";
+  if (type === "PROCEDURE") return "procedure";
+  if (type === "FUNCTION") return "function";
+  if (type === "TRIGGER") return "trigger";
+  if (type === "SEQUENCE") return "sequence";
+  if (type === "PACKAGE_BODY") return "package-body";
+  if (type === "PACKAGE") return "package";
+  if (type === "TYPE_BODY") return "type-body";
+  return "type";
+}
+
+function objectBrowserSchemaMatchesPinnedIdentity(identitySchema: string, rowSchema: string, database: string): boolean {
+  if (identitySchema === rowSchema) return true;
+  // Some drivers expose the selected database as a schema in Object Browser
+  // while the sidebar stores the same table directly under the database node.
+  // Treat only that database-as-schema alias as equivalent; real schemas still
+  // remain isolated from one another.
+  return (!identitySchema && rowSchema === database) || (!rowSchema && identitySchema === database);
+}
+
+export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
+  const schema = row.schema ?? context.schema ?? "";
+  const signature = row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "";
+  return (
+    identity.connectionId === context.connectionId &&
+    identity.database === context.database &&
+    objectBrowserSchemaMatchesPinnedIdentity(identity.schema, schema, context.database) &&
+    identity.catalog === (context.catalog || "") &&
+    identity.type === objectBrowserRowTreeNodeType(row.type) &&
+    identity.name === row.name &&
+    identity.signature === signature
+  );
+}
 
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
   const value = type.toUpperCase();

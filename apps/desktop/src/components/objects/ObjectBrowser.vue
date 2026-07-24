@@ -53,7 +53,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
@@ -89,6 +89,8 @@ import {
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
   initialObjectBrowserSortDirection,
+  objectBrowserRowMatchesPinnedTreeNode,
+  objectBrowserRowTreeNodeType,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
   type ObjectBrowserFilter,
@@ -656,6 +658,36 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   return rowMatchesFilter(row, objectFilter.value);
 }
 
+function sortObjectBrowserRowsWithPins(items: ObjectBrowserRow[]): ObjectBrowserRow[] {
+  const sorted = sortObjectBrowserRows(items, sortKey.value, sortDirection.value);
+  const context = {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    catalog: props.catalog,
+  };
+  return connectionStore.orderByPinnedTreeNodes(sorted, (row, identity) => objectBrowserRowMatchesPinnedTreeNode(row, identity, context));
+}
+
+function pinnedTreeNodeForObjectBrowserRow(row: ObjectBrowserRow): TreeNode {
+  const schema = row.schema || connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value);
+  return {
+    id: row.id,
+    label: row.name,
+    type: objectBrowserRowTreeNodeType(row.type),
+    objectName: row.name,
+    signature: row.signature?.trim() || undefined,
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    catalog: props.catalog,
+  };
+}
+
+function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
+  connectionStore.removePinnedTreeNodes(rows.map(pinnedTreeNodeForObjectBrowserRow));
+}
+
 function groupedFilteredRows() {
   const query = search.value.trim();
   const candidateRows = rows.value.filter(rowMatchesObjectFilter);
@@ -668,7 +700,7 @@ function groupedFilteredRows() {
     if (!query) return true;
     return matchingIds.has(row.id) || parentIdsWithMatchingPartitions.has(row.id);
   });
-  const sortedRoots = sortObjectBrowserRows(rootRows, sortKey.value, sortDirection.value);
+  const sortedRoots = sortObjectBrowserRowsWithPins(rootRows);
   const result: ObjectBrowserRow[] = [];
 
   for (const row of sortedRoots) {
@@ -679,7 +711,7 @@ function groupedFilteredRows() {
     const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
     if (!shouldShowPartitions) continue;
     const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
-    result.push(...sortObjectBrowserRows(visiblePartitions, sortKey.value, sortDirection.value));
+    result.push(...sortObjectBrowserRowsWithPins(visiblePartitions));
   }
 
   return result;
@@ -1201,6 +1233,7 @@ async function confirmDrop() {
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     closeDroppedTableObjectTabsForRow(row);
+    removePinnedObjectBrowserRows([row]);
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
   } catch (e: any) {
@@ -1448,6 +1481,7 @@ async function confirmBatchDropTables() {
     });
     if (!executed) return;
     toast(t("objects.batchDropSuccess", { count: targets.length }));
+    removePinnedObjectBrowserRows(targets);
     clearTableSelection();
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);

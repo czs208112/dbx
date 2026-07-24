@@ -22,7 +22,17 @@ import type {
   TunnelProfile,
   VectorCollectionMeta,
 } from "@/types/database";
-import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
+import {
+  inheritNaturalTreeNodeOrder,
+  migrateLegacyPinnedTreeNodeOrder,
+  normalizePinnedTreeNodeOrder,
+  orderItemsByPinnedTreeNodeOrder,
+  removePinnedTreeNodesFromOrder,
+  reorderPinnedTreeNodeOrder,
+  syncPinnedTreeNodeStateInPlace,
+  treeNodePinKey,
+  type PinnedTreeNodeIdentity,
+} from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -78,7 +88,6 @@ import {
 import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
 import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
 import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
-import { prunePinnedTreeNodeIdsForConnection } from "@/lib/app/pinnedTreeNodeIds";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -304,6 +313,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarDatabaseStorageInFlight = new Map<string, Promise<DatabaseStorageInfo[]>>();
   const sidebarTableStorageCache = new Map<string, { expiresAt: number; value: ObjectStatistics[] }>();
   const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
+  const pinnedTreeNodeOrder = ref<string[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
@@ -1002,27 +1012,27 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
-  function loadPinnedTreeNodeIdsFromLocalStorage(): Set<string> {
+  function loadPinnedTreeNodeOrderFromLocalStorage(): string[] {
     try {
-      if (typeof localStorage === "undefined") return new Set();
+      if (typeof localStorage === "undefined") return [];
       const saved = localStorage.getItem(PINNED_TREE_NODES_STORAGE_KEY);
       const ids = saved ? JSON.parse(saved) : [];
-      return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
+      return normalizePinnedTreeNodeOrder(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
     } catch {
-      return new Set();
+      return [];
     }
   }
 
-  async function loadPinnedTreeNodeIds(): Promise<Set<string>> {
-    if (!isDesktop) return loadPinnedTreeNodeIdsFromLocalStorage();
+  async function loadPinnedTreeNodeOrder(): Promise<string[]> {
+    if (!isDesktop) return loadPinnedTreeNodeOrderFromLocalStorage();
     const ids = await api.loadPinnedTreeNodeIds().catch(() => []);
-    const valid = ids.filter((id) => typeof id === "string");
-    if (valid.length > 0) return new Set(valid);
+    const valid = normalizePinnedTreeNodeOrder(ids.filter((id): id is string => typeof id === "string"));
+    if (valid.length > 0) return valid;
 
     // Migrate legacy localStorage values for existing desktop users.
-    const legacy = loadPinnedTreeNodeIdsFromLocalStorage();
-    if (legacy.size > 0) {
-      await api.savePinnedTreeNodeIds([...legacy]).catch(() => undefined);
+    const legacy = loadPinnedTreeNodeOrderFromLocalStorage();
+    if (legacy.length > 0) {
+      await api.savePinnedTreeNodeIds(legacy).catch(() => undefined);
       if (typeof localStorage !== "undefined") {
         localStorage.removeItem(PINNED_TREE_NODES_STORAGE_KEY);
       }
@@ -1030,18 +1040,50 @@ export const useConnectionStore = defineStore("connection", () => {
     return legacy;
   }
 
+  function setPinnedTreeNodeOrder(order: readonly string[]) {
+    const normalized = normalizePinnedTreeNodeOrder(order);
+    pinnedTreeNodeOrder.value = normalized;
+    pinnedTreeNodeIds.value = new Set(normalized);
+  }
+
   function persistPinnedTreeNodeIds() {
     if (isDesktop) {
-      void api.savePinnedTreeNodeIds([...pinnedTreeNodeIds.value]).catch(() => undefined);
+      void api.savePinnedTreeNodeIds(pinnedTreeNodeOrder.value).catch(() => undefined);
       return;
     }
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify([...pinnedTreeNodeIds.value]));
+    localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify(pinnedTreeNodeOrder.value));
+  }
+
+  function findLoadedTreeNodeById(nodes: readonly TreeNode[], id: string): TreeNode | null {
+    for (const node of nodes) {
+      if (node.id === id) return node;
+      const child = node.children ? findLoadedTreeNodeById(node.children, id) : null;
+      if (child) return child;
+      const hiddenChild = node.hiddenChildren ? findLoadedTreeNodeById(node.hiddenChildren, id) : null;
+      if (hiddenChild) return hiddenChild;
+    }
+    return null;
   }
 
   function isTreeNodePinned(node: TreeNode | string): boolean {
-    if (typeof node === "string") return pinnedTreeNodeIds.value.has(node);
-    return pinnedTreeNodeIds.value.has(treeNodePinKey(node)) || pinnedTreeNodeIds.value.has(node.id);
+    if (typeof node !== "string") return pinnedTreeNodeIds.value.has(treeNodePinKey(node)) || pinnedTreeNodeIds.value.has(node.id);
+    if (pinnedTreeNodeIds.value.has(node)) return true;
+    const loadedNode = findLoadedTreeNodeById(treeNodes.value, node);
+    return !!loadedNode && pinnedTreeNodeIds.value.has(treeNodePinKey(loadedNode));
+  }
+
+  function isFixedPriorityTreeNode(node: TreeNode): boolean {
+    if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
+    return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
+  }
+
+  function orderByPinnedTreeNodes<T>(items: readonly T[], matches: (item: T, identity: PinnedTreeNodeIdentity) => boolean): T[] {
+    return orderItemsByPinnedTreeNodeOrder(items, pinnedTreeNodeOrder.value, matches, treeNodes.value);
+  }
+
+  function syncPinnedTreeState(nodes: TreeNode[]) {
+    syncPinnedTreeNodeStateInPlace(nodes, pinnedTreeNodeIds.value, pinnedTreeNodeOrder.value, isFixedPriorityTreeNode);
   }
 
   function isConnectionUtilityNode(node: TreeNode): boolean {
@@ -1110,17 +1152,29 @@ export const useConnectionStore = defineStore("connection", () => {
         return child;
       });
     }
-    const migratedPins = migrateLegacyPinnedTreeNodeIds(children, pinnedTreeNodeIds.value);
+    const migratedPins = migrateLegacyPinnedTreeNodeOrder(children, pinnedTreeNodeOrder.value);
     if (migratedPins.changed) {
-      pinnedTreeNodeIds.value = migratedPins.ids;
+      setPinnedTreeNodeOrder(migratedPins.order);
       persistPinnedTreeNodeIds();
     }
-    syncPinnedTreeNodeStateInPlace(children, migratedPins.ids);
+    syncPinnedTreeState(children);
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 
+  function removePinnedTreeNodes(nodes: readonly TreeNode[]): boolean {
+    const nextPinnedOrder = removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, nodes);
+    if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
+    setPinnedTreeNodeOrder(nextPinnedOrder);
+    syncPinnedTreeState(treeNodes.value);
+    persistPinnedTreeNodeIds();
+    return true;
+  }
+
   function removeTreeNode(nodeId: string) {
+    const node = findNode(treeNodes.value, nodeId);
+    if (node) removePinnedTreeNodes([node]);
+
     const parent = findParentNode(treeNodes.value, nodeId);
     if (parent?.children) {
       parent.children = parent.children.filter((c) => c.id !== nodeId);
@@ -1816,19 +1870,53 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function toggleTreeNodePin(node: TreeNode) {
     const pinKey = treeNodePinKey(node);
-    const next = new Set(pinnedTreeNodeIds.value);
-    const wasPinned = next.has(pinKey) || next.has(node.id);
+    const wasPinned = pinnedTreeNodeIds.value.has(pinKey) || pinnedTreeNodeIds.value.has(node.id);
     // Remove the legacy bare id as part of every toggle so old ambiguous pins
-    // cannot continue matching objects in a different database.
-    next.delete(node.id);
-    if (wasPinned) next.delete(pinKey);
-    else next.add(pinKey);
-    pinnedTreeNodeIds.value = next;
+    // cannot continue matching objects in a different database. Newly pinned
+    // nodes append to the persisted order, placing them last in their sibling
+    // pin section until the user explicitly reorders them.
+    const next = pinnedTreeNodeOrder.value.filter((id) => id !== node.id && id !== pinKey);
+    if (!wasPinned) next.push(pinKey);
+    setPinnedTreeNodeOrder(next);
     persistPinnedTreeNodeIds();
 
     // Pinning is infrequent; synchronizing the loaded tree here also clears any
     // stale flags created by legacy unscoped ids without rebuilding metadata.
-    syncPinnedTreeNodeStateInPlace(treeNodes.value, next);
+    syncPinnedTreeState(treeNodes.value);
+  }
+
+  function findPinnedTreeNodeLocation(nodes: TreeNode[], pinKey: string): { node: TreeNode; siblings: TreeNode[] } | null {
+    for (const node of nodes) {
+      if (treeNodePinKey(node) === pinKey) return { node, siblings: nodes };
+      if (node.children) {
+        const found = findPinnedTreeNodeLocation(node.children, pinKey);
+        if (found) return found;
+      }
+      if (node.hiddenChildren) {
+        const found = findPinnedTreeNodeLocation(node.hiddenChildren, pinKey);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function canReorderPinnedTreeNodes(draggedKey: string, targetKey: string): boolean {
+    if (!draggedKey || !targetKey || draggedKey === targetKey) return false;
+    const dragged = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
+    const target = findPinnedTreeNodeLocation(treeNodes.value, targetKey);
+    if (!dragged || !target || dragged.siblings !== target.siblings) return false;
+    if (!isTreeNodePinned(dragged.node) || !isTreeNodePinned(target.node)) return false;
+    return !isFixedPriorityTreeNode(dragged.node) && !isFixedPriorityTreeNode(target.node);
+  }
+
+  function reorderPinnedTreeNodes(draggedKey: string, targetKey: string, position: DropPosition): boolean {
+    if (position === "inside" || !canReorderPinnedTreeNodes(draggedKey, targetKey)) return false;
+    const next = reorderPinnedTreeNodeOrder(pinnedTreeNodeOrder.value, draggedKey, targetKey, position);
+    if (next.length === pinnedTreeNodeOrder.value.length && next.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
+    setPinnedTreeNodeOrder(next);
+    syncPinnedTreeState(treeNodes.value);
+    persistPinnedTreeNodeIds();
+    return true;
   }
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
@@ -1942,9 +2030,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     await persistConnections(nextConnections);
     connections.value = nextConnections;
+    let nextPinnedOrder = pinnedTreeNodeOrder.value;
     for (const id of removedIds) {
-      pinnedTreeNodeIds.value = prunePinnedTreeNodeIdsForConnection(pinnedTreeNodeIds.value, id);
+      const prefix = `${id}:`;
+      nextPinnedOrder = nextPinnedOrder.filter((pinId) => pinId !== id && !pinId.startsWith(prefix));
     }
+    setPinnedTreeNodeOrder(nextPinnedOrder);
     persistPinnedTreeNodeIds();
     removeSidebarTableNameFiltersForConnections(removedIds);
     for (const id of removedIds) {
@@ -5450,7 +5541,14 @@ export const useConnectionStore = defineStore("connection", () => {
         }
         return node;
       });
-    treeNodes.value = mergeState(freshNodes);
+    const mergedNodes = mergeState(freshNodes);
+    const migratedPins = migrateLegacyPinnedTreeNodeOrder(mergedNodes, pinnedTreeNodeOrder.value);
+    if (migratedPins.changed) {
+      setPinnedTreeNodeOrder(migratedPins.order);
+      persistPinnedTreeNodeIds();
+    }
+    syncPinnedTreeState(mergedNodes);
+    treeNodes.value = mergedNodes;
   }
 
   function updateLayoutAndRebuild(nextLayout: SidebarLayout) {
@@ -5899,8 +5997,8 @@ export const useConnectionStore = defineStore("connection", () => {
   async function initFromDisk() {
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
-        const [pinnedIds, saved] = await Promise.all([loadPinnedTreeNodeIds(), api.loadConnections(), tunnelProfileStore.init()]);
-        pinnedTreeNodeIds.value = pinnedIds;
+        const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
+        setPinnedTreeNodeOrder(pinnedOrder);
         connections.value = saved.map(normalizeConnection);
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
@@ -5936,6 +6034,7 @@ export const useConnectionStore = defineStore("connection", () => {
     connectionMultiSelectActive,
     treeClipboard,
     treeNodes,
+    removePinnedTreeNodes,
     removeTreeNode,
     refreshAllTree,
     collapseAllTreeNodes,
@@ -5956,7 +6055,10 @@ export const useConnectionStore = defineStore("connection", () => {
     getConfig,
     connectionIdentifierQuote,
     isTreeNodePinned,
+    orderByPinnedTreeNodes,
     toggleTreeNodePin,
+    canReorderPinnedTreeNodes,
+    reorderPinnedTreeNodes,
     addConnection,
     copyConnectionsToTreeClipboard,
     pasteConnectionClipboard,
