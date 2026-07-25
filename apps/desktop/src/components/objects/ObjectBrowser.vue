@@ -72,6 +72,7 @@ import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -88,9 +89,10 @@ import {
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
+  canonicalizeObjectBrowserPinnedTreeNodeIdentity,
   initialObjectBrowserSortDirection,
   objectBrowserRowMatchesPinnedTreeNode,
-  objectBrowserRowTreeNodeType,
+  objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
   type ObjectBrowserFilter,
@@ -658,34 +660,42 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   return rowMatchesFilter(row, objectFilter.value);
 }
 
-function sortObjectBrowserRowsWithPins(items: ObjectBrowserRow[]): ObjectBrowserRow[] {
-  const sorted = sortObjectBrowserRows(items, sortKey.value, sortDirection.value);
-  const context = {
+function objectBrowserPinnedTreeNodeContext() {
+  return {
     connectionId: props.connection.id,
     database: props.database,
     schema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
     catalog: props.catalog,
   };
+}
+
+function canonicalizeObjectBrowserPinnedIdentity(identity: PinnedTreeNodeIdentity): PinnedTreeNodeIdentity {
+  return canonicalizeObjectBrowserPinnedTreeNodeIdentity(objectBrowserPinnedTreeNodeContext())(identity);
+}
+
+function sortObjectBrowserRowsWithPins(items: ObjectBrowserRow[]): ObjectBrowserRow[] {
+  const sorted = sortObjectBrowserRows(items, sortKey.value, sortDirection.value);
+  const context = objectBrowserPinnedTreeNodeContext();
   return connectionStore.orderByPinnedTreeNodes(sorted, (row, identity) => objectBrowserRowMatchesPinnedTreeNode(row, identity, context));
 }
 
 function pinnedTreeNodeForObjectBrowserRow(row: ObjectBrowserRow): TreeNode {
-  const schema = row.schema || connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value);
+  const identity = objectBrowserRowPinnedTreeNodeIdentity(row, objectBrowserPinnedTreeNodeContext());
   return {
-    id: row.id,
-    label: row.name,
-    type: objectBrowserRowTreeNodeType(row.type),
-    objectName: row.name,
-    signature: row.signature?.trim() || undefined,
-    connectionId: props.connection.id,
-    database: props.database,
-    schema,
-    catalog: props.catalog,
+    id: identity.id,
+    label: identity.name,
+    type: identity.type,
+    objectName: identity.name,
+    signature: identity.signature || undefined,
+    connectionId: identity.connectionId,
+    database: identity.database,
+    schema: identity.schema || undefined,
+    catalog: identity.catalog || undefined,
   };
 }
 
 function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
-  connectionStore.removePinnedTreeNodes(rows.map(pinnedTreeNodeForObjectBrowserRow));
+  connectionStore.removePinnedTreeNodes(rows.map(pinnedTreeNodeForObjectBrowserRow), canonicalizeObjectBrowserPinnedIdentity);
 }
 
 function groupedFilteredRows() {
@@ -1216,8 +1226,18 @@ async function confirmRename() {
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
     if (sourceRow.value?.id === row.id) closeSource();
+    const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
+    const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
+    if (renamedRow) {
+      connectionStore.replacePinnedTreeNode(oldPinnedNode, pinnedTreeNodeForObjectBrowserRow(renamedRow), canonicalizeObjectBrowserPinnedIdentity);
+    } else {
+      // The database mutation succeeded, so never leave the old name pinned if
+      // metadata refresh cannot resolve its replacement.
+      connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
+    }
   } catch (e: any) {
     renameError.value = e?.message || String(e);
   }

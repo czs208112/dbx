@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import type { TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -11,15 +12,15 @@ function installLocalStorage() {
   });
 }
 
-function tableNode(): TreeNode {
+function tableNode(name = "users"): TreeNode {
   return {
-    id: "conn:db:public:users",
-    label: "users",
+    id: `conn:db:public:${name}`,
+    label: name,
     type: "table",
     connectionId: "conn",
     database: "db",
     schema: "public",
-    tableName: "users",
+    tableName: name,
   };
 }
 
@@ -55,5 +56,64 @@ describe("connectionStore pinned tree node removal", () => {
     store.treeNodes[0].children = [replacement];
 
     expect(store.isTreeNodePinned(replacement)).toBe(false);
+  });
+
+  it("serializes desktop pin saves so an older reorder cannot overwrite the latest one", async () => {
+    const savePinnedTreeNodeIds = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@/lib/backend/api", () => ({ savePinnedTreeNodeIds }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const orders = tableNode("orders");
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users, orders] }];
+    store.toggleTreeNodePin(users);
+    store.toggleTreeNodePin(orders);
+    await vi.waitFor(() => expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(2));
+
+    savePinnedTreeNodeIds.mockClear();
+    const snapshots: string[][] = [];
+    const resolvers: Array<() => void> = [];
+    savePinnedTreeNodeIds.mockImplementation((ids: string[]) => {
+      snapshots.push([...ids]);
+      return new Promise<void>((resolve) => resolvers.push(resolve));
+    });
+
+    const usersKey = treeNodePinKey(users);
+    const ordersKey = treeNodePinKey(orders);
+    expect(store.reorderPinnedTreeNodes(usersKey, ordersKey, "after")).toBe(true);
+    await vi.waitFor(() => expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(1));
+    expect(store.reorderPinnedTreeNodes(ordersKey, usersKey, "after")).toBe(true);
+
+    expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(1);
+    resolvers[0]!();
+    await vi.waitFor(() => expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(2));
+    resolvers[1]!();
+
+    expect(snapshots).toEqual([
+      [ordersKey, usersKey],
+      [usersKey, ordersKey],
+    ]);
+  });
+
+  it("moves a renamed pinned object to its new identity so recreating the old name is unpinned", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const accounts = tableNode("accounts");
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users] }];
+    store.toggleTreeNodePin(users);
+
+    store.treeNodes[0].children = [accounts];
+    store.replacePinnedTreeNode(users, accounts);
+
+    const recreatedUsers = tableNode("users");
+    store.treeNodes[0].children = [accounts, recreatedUsers];
+
+    expect(store.isTreeNodePinned(accounts)).toBe(true);
+    expect(store.isTreeNodePinned(recreatedUsers)).toBe(false);
   });
 });

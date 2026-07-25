@@ -27,11 +27,15 @@ import {
   migrateLegacyPinnedTreeNodeOrder,
   normalizePinnedTreeNodeOrder,
   orderItemsByPinnedTreeNodeOrder,
+  pinnedTreeNodeIdentityMatches,
   removePinnedTreeNodesFromOrder,
   reorderPinnedTreeNodeOrder,
+  replacePinnedTreeNodeInOrder,
   syncPinnedTreeNodeStateInPlace,
+  treeNodePinIdentity,
   treeNodePinKey,
   type PinnedTreeNodeIdentity,
+  type PinnedTreeNodeIdentityCanonicalizer,
 } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
@@ -315,6 +319,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeOrder = ref<string[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
+  let pinnedTreeNodePersistQueue: Promise<void> = Promise.resolve();
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
@@ -1047,12 +1052,15 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function persistPinnedTreeNodeIds() {
+    const snapshot = [...pinnedTreeNodeOrder.value];
     if (isDesktop) {
-      void api.savePinnedTreeNodeIds(pinnedTreeNodeOrder.value).catch(() => undefined);
+      // A later drag must never be persisted before an earlier request finishes:
+      // otherwise a slow old request can overwrite the final ordering on disk.
+      pinnedTreeNodePersistQueue = pinnedTreeNodePersistQueue.catch(() => undefined).then(() => api.savePinnedTreeNodeIds(snapshot).catch(() => undefined));
       return;
     }
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify(pinnedTreeNodeOrder.value));
+    localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify(snapshot));
   }
 
   function findLoadedTreeNodeById(nodes: readonly TreeNode[], id: string): TreeNode | null {
@@ -1162,8 +1170,20 @@ export const useConnectionStore = defineStore("connection", () => {
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 
-  function removePinnedTreeNodes(nodes: readonly TreeNode[]): boolean {
-    const nextPinnedOrder = removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, nodes);
+  function removePinnedTreeNodes(nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
+    const nextPinnedOrder = removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, nodes, canonicalize);
+    if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
+    setPinnedTreeNodeOrder(nextPinnedOrder);
+    syncPinnedTreeState(treeNodes.value);
+    persistPinnedTreeNodeIds();
+    return true;
+  }
+
+  function replacePinnedTreeNode(oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
+    // Use the freshly loaded sidebar node when available so the persisted key
+    // carries its real id, not the id of the pre-rename object.
+    const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0] ?? newNode;
+    const nextPinnedOrder = replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize);
     if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
     setPinnedTreeNodeOrder(nextPinnedOrder);
     syncPinnedTreeState(treeNodes.value);
@@ -6035,6 +6055,7 @@ export const useConnectionStore = defineStore("connection", () => {
     treeClipboard,
     treeNodes,
     removePinnedTreeNodes,
+    replacePinnedTreeNode,
     removeTreeNode,
     refreshAllTree,
     collapseAllTreeNodes,

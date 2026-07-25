@@ -1,5 +1,5 @@
 import type { ObjectInfo, TreeNodeType } from "@/types/database";
-import type { PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
+import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
@@ -48,27 +48,32 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   return "type";
 }
 
-function objectBrowserSchemaMatchesPinnedIdentity(identitySchema: string, rowSchema: string, database: string): boolean {
-  if (identitySchema === rowSchema) return true;
-  // Some drivers expose the selected database as a schema in Object Browser
-  // while the sidebar stores the same table directly under the database node.
-  // Treat only that database-as-schema alias as equivalent; real schemas still
-  // remain isolated from one another.
-  return (!identitySchema && rowSchema === database) || (!rowSchema && identitySchema === database);
+export function canonicalObjectBrowserPinnedTreeNodeIdentity(identity: PinnedTreeNodeIdentity, database: string): PinnedTreeNodeIdentity {
+  // Some drivers expose database-level objects with the selected database as
+  // their schema, while the sidebar represents the same objects without one.
+  // Canonicalize only this alias; real schemas remain distinct.
+  return identity.schema === database ? { ...identity, schema: "" } : identity;
+}
+
+export function canonicalizeObjectBrowserPinnedTreeNodeIdentity(context: ObjectBrowserPinnedTreeNodeContext): (identity: PinnedTreeNodeIdentity) => PinnedTreeNodeIdentity {
+  return (identity) => canonicalObjectBrowserPinnedTreeNodeIdentity(identity, context.database);
+}
+
+export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): PinnedTreeNodeIdentity {
+  return {
+    connectionId: context.connectionId,
+    database: context.database,
+    schema: row.schema ?? context.schema ?? "",
+    catalog: context.catalog || "",
+    type: objectBrowserRowTreeNodeType(row.type),
+    name: row.name,
+    signature: row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "",
+    id: row.id,
+  };
 }
 
 export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
-  const schema = row.schema ?? context.schema ?? "";
-  const signature = row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "";
-  return (
-    identity.connectionId === context.connectionId &&
-    identity.database === context.database &&
-    objectBrowserSchemaMatchesPinnedIdentity(identity.schema, schema, context.database) &&
-    identity.catalog === (context.catalog || "") &&
-    identity.type === objectBrowserRowTreeNodeType(row.type) &&
-    identity.name === row.name &&
-    identity.signature === signature
-  );
+  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
 }
 
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {

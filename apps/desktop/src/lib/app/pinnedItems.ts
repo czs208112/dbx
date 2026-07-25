@@ -3,6 +3,7 @@ import type { TreeNode } from "@/types/database";
 export type PinnedTreeNodeUpdateScope = "missing" | "root" | "siblings";
 export type PinnedTreeNodeDropPosition = "before" | "after";
 export type FixedTreeNodePriority = (node: TreeNode) => boolean;
+export type PinnedTreeNodeIdentityCanonicalizer = (identity: PinnedTreeNodeIdentity) => PinnedTreeNodeIdentity;
 export type PinnedTreeNodeIdentity = {
   connectionId: string;
   database: string;
@@ -79,11 +80,27 @@ export function normalizePinnedTreeNodeOrder(ids: readonly string[]): string[] {
   return normalized;
 }
 
-function pinnedTreeNodeIdentityMatches(left: PinnedTreeNodeIdentity, right: PinnedTreeNodeIdentity): boolean {
-  return left.connectionId === right.connectionId && left.database === right.database && left.schema === right.schema && left.catalog === right.catalog && left.type === right.type && left.name === right.name && left.signature === right.signature;
+export function pinnedTreeNodeIdentityMatches(left: PinnedTreeNodeIdentity, right: PinnedTreeNodeIdentity, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
+  const canonicalLeft = canonicalize(left);
+  const canonicalRight = canonicalize(right);
+  return (
+    canonicalLeft.connectionId === canonicalRight.connectionId &&
+    canonicalLeft.database === canonicalRight.database &&
+    canonicalLeft.schema === canonicalRight.schema &&
+    canonicalLeft.catalog === canonicalRight.catalog &&
+    canonicalLeft.type === canonicalRight.type &&
+    canonicalLeft.name === canonicalRight.name &&
+    canonicalLeft.signature === canonicalRight.signature
+  );
 }
 
-export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: readonly TreeNode[]): string[] {
+function pinnedTreeNodeOrderKeyMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer): boolean {
+  if (key === treeNodePinKey(node) || key === node.id) return true;
+  const identity = parseTreeNodePinKey(key);
+  return !!identity && pinnedTreeNodeIdentityMatches(identity, treeNodePinIdentity(node), canonicalize);
+}
+
+export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string[] {
   const removedKeys = new Set<string>();
   const removedIdentities: PinnedTreeNodeIdentity[] = [];
   const visited = new WeakSet<TreeNode>();
@@ -105,8 +122,21 @@ export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: 
   return normalizePinnedTreeNodeOrder(order).filter((key) => {
     if (removedKeys.has(key)) return false;
     const identity = parseTreeNodePinKey(key);
-    return !identity || !removedIdentities.some((removed) => pinnedTreeNodeIdentityMatches(identity, removed));
+    return !identity || !removedIdentities.some((removed) => pinnedTreeNodeIdentityMatches(identity, removed, canonicalize));
   });
+}
+
+/** Replaces a pinned object identity in place after a successful rename. */
+export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string[] {
+  const normalized = normalizePinnedTreeNodeOrder(order);
+  const oldIndex = normalized.findIndex((key) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize));
+  if (oldIndex < 0) return normalized;
+
+  const shouldRemove = (key: string) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize) || pinnedTreeNodeOrderKeyMatchesNode(key, newNode, canonicalize);
+  const replacementIndex = normalized.slice(0, oldIndex).filter((key) => !shouldRemove(key)).length;
+  const next = normalized.filter((key) => !shouldRemove(key));
+  next.splice(replacementIndex, 0, treeNodePinKey(newNode));
+  return normalizePinnedTreeNodeOrder(next);
 }
 
 export function migrateLegacyPinnedTreeNodeOrder(nodes: readonly TreeNode[], pinnedOrder: readonly string[]): { order: string[]; ids: Set<string>; changed: boolean } {

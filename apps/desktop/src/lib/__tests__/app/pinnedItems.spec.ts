@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { reactive } from "vue";
-import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, migrateLegacyPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, reorderPinnedTreeNodeOrder, syncPinnedTreeNodeStateInPlace, treeNodePinKey, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
+import {
+  inheritNaturalTreeNodeOrder,
+  migrateLegacyPinnedTreeNodeIds,
+  migrateLegacyPinnedTreeNodeOrder,
+  removePinnedTreeNodesFromOrder,
+  reorderPinnedTreeNodeOrder,
+  replacePinnedTreeNodeInOrder,
+  syncPinnedTreeNodeStateInPlace,
+  treeNodePinKey,
+  updatePinnedTreeNodeInPlace,
+} from "@/lib/app/pinnedItems";
 import { buildTreeNodesFromLayout } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 
@@ -158,6 +168,17 @@ describe("sidebar pinned tree nodes", () => {
     expect(remainingOrder).toEqual([treeNodePinKey(anotherTable)]);
     expect(remainingOrder).not.toContain(treeNodePinKey(recreatedTable));
     expect(remainingOrder).not.toContain(treeNodePinKey(renamedTable));
+  });
+
+  it("moves a renamed pin to the new identity without retaining the old name", () => {
+    const users: TreeNode = { id: "conn:db:public:users", label: "users", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "users" };
+    const orders: TreeNode = { id: "conn:db:public:orders", label: "orders", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "orders" };
+    const accounts: TreeNode = { ...users, id: "conn:db:public:accounts", label: "accounts", tableName: "accounts" };
+
+    const renamedOrder = replacePinnedTreeNodeInOrder([treeNodePinKey(users), treeNodePinKey(orders)], users, accounts);
+
+    expect(renamedOrder).toEqual([treeNodePinKey(accounts), treeNodePinKey(orders)]);
+    expect(renamedOrder).not.toContain(treeNodePinKey(users));
   });
 
   it("migrates a legacy id once instead of pinning every colliding node", () => {

@@ -1873,7 +1873,9 @@ async function confirmRenameObject() {
     }
     toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
     showRenameObjectDialog.value = false;
+    const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
     await refreshTableList(node);
+    connectionStore.replacePinnedTreeNode(node, renamedNode);
   } catch (e: any) {
     renameObjectError.value = e?.message || String(e);
   }
@@ -1891,6 +1893,9 @@ async function confirmDropObject() {
     const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
+    // Procedure/function drops refresh their parent instead of removing this
+    // node directly, so clear their pin before the old identity can survive.
+    connectionStore.removePinnedTreeNodes([node]);
     if (node.type === "view" || node.type === "materialized_view") {
       connectionStore.removeTreeNode(node.id);
       releaseActiveNodeReference([node.id]);
