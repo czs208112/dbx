@@ -1874,8 +1874,19 @@ async function confirmRenameObject() {
     toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
     showRenameObjectDialog.value = false;
     const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
-    await refreshTableList(node);
+    let refreshError: unknown;
+    try {
+      await refreshTableList(node);
+    } catch (e) {
+      refreshError = e;
+    }
+    // Finalize the old pin even when the metadata refresh fails. The store only
+    // migrates to a real loaded sidebar replacement; otherwise it removes it.
     connectionStore.replacePinnedTreeNode(node, renamedNode);
+    if (refreshError) {
+      const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+      toast(t("contextMenu.tableOperationFailed", { message }), 5000);
+    }
   } catch (e: any) {
     renameObjectError.value = e?.message || String(e);
   }

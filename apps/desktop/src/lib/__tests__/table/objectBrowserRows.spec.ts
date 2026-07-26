@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderItemsByPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, treeNodePinIdentity, treeNodePinKey } from "@/lib/app/pinnedItems";
+import { migrateLegacyPinnedTreeNodeOrder, orderItemsByPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, treeNodePinIdentity, treeNodePinKey } from "@/lib/app/pinnedItems";
 import { buildObjectBrowserRows, canonicalizeObjectBrowserPinnedTreeNodeIdentity, objectBrowserRowMatchesPinnedTreeNode, sortObjectBrowserRows, type ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 import type { TreeNode } from "@/types/database";
 
@@ -90,6 +90,17 @@ describe("Object Browser pinned ordering", () => {
     const remainingOrder = removePinnedTreeNodesFromOrder([treeNodePinKey(sidebarNode)], [objectBrowserNode], canonicalize);
 
     expect(remainingOrder).toEqual([]);
+  });
+
+  it("suppresses a database-as-schema legacy pin after Object Browser deletion", () => {
+    const sidebarNode = tableNode("events", "");
+    const objectBrowserNode: TreeNode = { ...sidebarNode, id: "object-browser:app:events", schema: "app" };
+    const canonicalize = canonicalizeObjectBrowserPinnedTreeNodeIdentity({ connectionId: "conn", database: "app" });
+
+    const orderAfterDelete = removePinnedTreeNodesFromOrder([sidebarNode.id], [objectBrowserNode], canonicalize);
+    const migrated = migrateLegacyPinnedTreeNodeOrder([sidebarNode], orderAfterDelete);
+
+    expect(migrated.order).toEqual([]);
   });
 
   it("does not confuse same-name objects across schemas or routine overloads", () => {

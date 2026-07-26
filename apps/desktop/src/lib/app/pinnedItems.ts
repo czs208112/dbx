@@ -16,6 +16,8 @@ export type PinnedTreeNodeIdentity = {
 };
 
 const NATURAL_TREE_NODE_ORDER = Symbol("naturalTreeNodeOrder");
+const PIN_KEY_MARKER = ":pin:v2:";
+const REMOVED_PIN_KEY_MARKER = ":pin:v2:removed:";
 type OrderedTreeNode = TreeNode & { [NATURAL_TREE_NODE_ORDER]?: number };
 
 function naturalTreeNodeOrder(node: TreeNode): number | undefined {
@@ -55,18 +57,50 @@ export function treeNodePinKey(node: TreeNode): string {
 }
 
 export function parseTreeNodePinKey(key: string): PinnedTreeNodeIdentity | null {
-  const marker = ":pin:v2:";
-  const markerIndex = key.indexOf(marker);
+  const markerIndex = key.indexOf(PIN_KEY_MARKER);
   if (markerIndex <= 0) return null;
 
   try {
-    const payload = JSON.parse(decodeURIComponent(key.slice(markerIndex + marker.length)));
+    const payload = JSON.parse(decodeURIComponent(key.slice(markerIndex + PIN_KEY_MARKER.length)));
     if (!Array.isArray(payload) || payload.length !== 7 || payload.some((value) => typeof value !== "string")) return null;
     const [database, schema, catalog, type, name, signature, id] = payload;
     return { connectionId: key.slice(0, markerIndex), database, schema, catalog, type: type as TreeNode["type"], name, signature, id };
   } catch {
     return null;
   }
+}
+
+/** A semantic tombstone suppresses an unresolved legacy bare id if its node is loaded later. */
+export function removedTreeNodePinKey(node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string {
+  const identity = canonicalize(treeNodePinIdentity(node));
+  const payload = [identity.database, identity.schema, identity.catalog, identity.type, identity.name, identity.signature];
+  return `${identity.connectionId}${REMOVED_PIN_KEY_MARKER}${encodeURIComponent(JSON.stringify(payload))}`;
+}
+
+export function parseRemovedTreeNodePinKey(key: string): PinnedTreeNodeIdentity | null {
+  const markerIndex = key.indexOf(REMOVED_PIN_KEY_MARKER);
+  if (markerIndex <= 0) return null;
+  try {
+    const payload = JSON.parse(decodeURIComponent(key.slice(markerIndex + REMOVED_PIN_KEY_MARKER.length)));
+    if (!Array.isArray(payload) || payload.length !== 6 || payload.some((value) => typeof value !== "string")) return null;
+    const [database, schema, catalog, type, name, signature] = payload;
+    return { connectionId: key.slice(0, markerIndex), database, schema, catalog, type: type as TreeNode["type"], name, signature, id: "" };
+  } catch {
+    return null;
+  }
+}
+
+function isLegacyBarePinKey(key: string): boolean {
+  return !parseTreeNodePinKey(key) && !parseRemovedTreeNodePinKey(key);
+}
+
+function hasLegacyBarePinForConnection(order: readonly string[], connectionId: string): boolean {
+  return !!connectionId && order.some((key) => isLegacyBarePinKey(key) && key.startsWith(`${connectionId}:`));
+}
+
+function removalMarkerMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer): boolean {
+  const identity = parseRemovedTreeNodePinKey(key);
+  return !!identity && pinnedTreeNodeIdentityMatches(identity, treeNodePinIdentity(node), canonicalize);
 }
 
 export function normalizePinnedTreeNodeOrder(ids: readonly string[]): string[] {
@@ -119,23 +153,34 @@ export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: 
   };
 
   visit(nodes);
-  return normalizePinnedTreeNodeOrder(order).filter((key) => {
+  const normalized = normalizePinnedTreeNodeOrder(order);
+  const next = normalized.filter((key) => {
     if (removedKeys.has(key)) return false;
     const identity = parseTreeNodePinKey(key);
     return !identity || !removedIdentities.some((removed) => pinnedTreeNodeIdentityMatches(identity, removed, canonicalize));
   });
+  // A row-derived Object Browser id cannot identify an unloaded legacy sidebar
+  // node. Keep a semantic tombstone only while legacy bare keys still exist;
+  // migration consumes it when that old node is encountered later.
+  for (const removed of nodes) {
+    if (hasLegacyBarePinForConnection(normalized, removed.connectionId || "")) next.push(removedTreeNodePinKey(removed, canonicalize));
+  }
+  return normalizePinnedTreeNodeOrder(next);
 }
 
 /** Replaces a pinned object identity in place after a successful rename. */
 export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string[] {
   const normalized = normalizePinnedTreeNodeOrder(order);
   const oldIndex = normalized.findIndex((key) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize));
-  if (oldIndex < 0) return normalized;
+  if (oldIndex < 0) {
+    return hasLegacyBarePinForConnection(normalized, oldNode.connectionId || "") ? normalizePinnedTreeNodeOrder([...normalized, removedTreeNodePinKey(oldNode, canonicalize)]) : normalized;
+  }
 
   const shouldRemove = (key: string) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize) || pinnedTreeNodeOrderKeyMatchesNode(key, newNode, canonicalize);
   const replacementIndex = normalized.slice(0, oldIndex).filter((key) => !shouldRemove(key)).length;
   const next = normalized.filter((key) => !shouldRemove(key));
   next.splice(replacementIndex, 0, treeNodePinKey(newNode));
+  if (hasLegacyBarePinForConnection(normalized, oldNode.connectionId || "")) next.push(removedTreeNodePinKey(oldNode, canonicalize));
   return normalizePinnedTreeNodeOrder(next);
 }
 
@@ -146,16 +191,27 @@ export function migrateLegacyPinnedTreeNodeOrder(nodes: readonly TreeNode[], pin
     for (const node of items) {
       const pinKey = treeNodePinKey(node);
       const legacyIndex = pinKey === node.id ? -1 : next.indexOf(node.id);
+      const removalMarkerIndex = next.findIndex((key) => removalMarkerMatchesNode(key, node, (identity) => identity));
       if (legacyIndex >= 0) {
-        const scopedIndex = next.indexOf(pinKey);
-        if (scopedIndex < 0) {
-          // Replace in place so upgrading a legacy key never changes the user's
-          // persisted order. A colliding legacy id is claimed by the first
-          // matching loaded node, matching the previous migration behavior.
-          next[legacyIndex] = pinKey;
-        } else {
+        if (removalMarkerIndex >= 0) {
           next.splice(legacyIndex, 1);
+        } else {
+          const scopedIndex = next.indexOf(pinKey);
+          if (scopedIndex < 0) {
+            // Replace in place so upgrading a legacy key never changes the user's
+            // persisted order. A colliding legacy id is claimed by the first
+            // matching loaded node, matching the previous migration behavior.
+            next[legacyIndex] = pinKey;
+          } else {
+            next.splice(legacyIndex, 1);
+          }
         }
+        changed = true;
+      }
+      if (removalMarkerIndex >= 0 && legacyIndex >= 0) {
+        // The paired legacy key has been consumed, so the tombstone is no longer needed.
+        const index = next.indexOf(removedTreeNodePinKey(node));
+        if (index >= 0) next.splice(index, 1);
         changed = true;
       }
       if (node.children) visit(node.children);

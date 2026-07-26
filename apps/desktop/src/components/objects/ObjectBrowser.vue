@@ -72,7 +72,7 @@ import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
+import type { PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -1228,15 +1228,20 @@ async function confirmRename() {
     if (sourceRow.value?.id === row.id) closeSource();
     const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
     const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
-    await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
-    const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
-    if (renamedRow) {
-      connectionStore.replacePinnedTreeNode(oldPinnedNode, pinnedTreeNodeForObjectBrowserRow(renamedRow), canonicalizeObjectBrowserPinnedIdentity);
-    } else {
-      // The database mutation succeeded, so never leave the old name pinned if
-      // metadata refresh cannot resolve its replacement.
-      connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
+    let refreshError: unknown;
+    try {
+      await reload();
+      await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    } catch (e) {
+      refreshError = e;
+    }
+    // The database mutation has already succeeded. Always finalize the old pin:
+    // the store migrates it only when a real sidebar replacement was loaded,
+    // otherwise it removes the old identity instead of persisting this row id.
+    connectionStore.replacePinnedTreeNode(oldPinnedNode, renamedTarget, canonicalizeObjectBrowserPinnedIdentity);
+    if (refreshError) {
+      const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+      toast(t("contextMenu.tableOperationFailed", { message }), 5000);
     }
   } catch (e: any) {
     renameError.value = e?.message || String(e);

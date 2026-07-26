@@ -97,6 +97,40 @@ describe("connectionStore pinned tree node removal", () => {
     ]);
   });
 
+  it("clears the old pin instead of persisting an Object Browser replacement id", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const objectBrowserAccounts: TreeNode = { ...tableNode("accounts"), id: "object-browser:public:accounts:TABLE:0" };
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users] }];
+    store.toggleTreeNodePin(users);
+
+    store.replacePinnedTreeNode(users, objectBrowserAccounts);
+
+    expect(store.isTreeNodePinned(users)).toBe(false);
+    expect(store.isTreeNodePinned(objectBrowserAccounts)).toBe(false);
+  });
+
+  it("uses the loaded sidebar replacement instead of the Object Browser row id", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const sidebarAccounts = tableNode("accounts");
+    const objectBrowserAccounts: TreeNode = { ...sidebarAccounts, id: "object-browser:public:accounts:TABLE:0" };
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users] }];
+    store.toggleTreeNodePin(users);
+
+    store.treeNodes[0].children = [sidebarAccounts];
+    store.replacePinnedTreeNode(users, objectBrowserAccounts);
+
+    expect(store.isTreeNodePinned(sidebarAccounts)).toBe(true);
+    expect(store.isTreeNodePinned(objectBrowserAccounts)).toBe(false);
+  });
+
   it("moves a renamed pinned object to its new identity so recreating the old name is unpinned", async () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 

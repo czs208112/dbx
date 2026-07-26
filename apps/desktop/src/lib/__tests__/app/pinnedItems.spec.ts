@@ -6,6 +6,7 @@ import {
   migrateLegacyPinnedTreeNodeOrder,
   removePinnedTreeNodesFromOrder,
   reorderPinnedTreeNodeOrder,
+  removedTreeNodePinKey,
   replacePinnedTreeNodeInOrder,
   syncPinnedTreeNodeStateInPlace,
   treeNodePinKey,
@@ -168,6 +169,31 @@ describe("sidebar pinned tree nodes", () => {
     expect(remainingOrder).toEqual([treeNodePinKey(anotherTable)]);
     expect(remainingOrder).not.toContain(treeNodePinKey(recreatedTable));
     expect(remainingOrder).not.toContain(treeNodePinKey(renamedTable));
+  });
+
+  it("consumes an unresolved legacy pin after its deleted semantic identity is loaded again", () => {
+    const deletedTable: TreeNode = { id: "conn:db:public:users", label: "users", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "users" };
+    const orderAfterDelete = removePinnedTreeNodesFromOrder([deletedTable.id], [{ ...deletedTable, id: "object-browser-row-id" }]);
+
+    expect(orderAfterDelete).toEqual([deletedTable.id, removedTreeNodePinKey(deletedTable)]);
+
+    const migrated = migrateLegacyPinnedTreeNodeOrder([deletedTable], orderAfterDelete);
+
+    expect(migrated.changed).toBe(true);
+    expect(migrated.order).toEqual([]);
+  });
+
+  it("does not treat a legacy-removal tombstone as a pinned item", () => {
+    const users: TreeNode = { id: "conn:db:public:users", label: "users", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "users" };
+    const orders: TreeNode = { id: "conn:db:public:orders", label: "orders", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "orders" };
+    const nodes = [users, orders];
+    const order = [removedTreeNodePinKey(users), treeNodePinKey(orders)];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(order), order);
+
+    expect(users.pinned).toBe(false);
+    expect(orders.pinned).toBe(true);
+    expect(nodes.map((node) => node.id)).toEqual([orders.id, users.id]);
   });
 
   it("moves a renamed pin to the new identity without retaining the old name", () => {

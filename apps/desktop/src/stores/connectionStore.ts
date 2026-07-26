@@ -28,6 +28,7 @@ import {
   normalizePinnedTreeNodeOrder,
   orderItemsByPinnedTreeNodeOrder,
   pinnedTreeNodeIdentityMatches,
+  parseRemovedTreeNodePinKey,
   removePinnedTreeNodesFromOrder,
   reorderPinnedTreeNodeOrder,
   replacePinnedTreeNodeInOrder,
@@ -1180,10 +1181,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function replacePinnedTreeNode(oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
-    // Use the freshly loaded sidebar node when available so the persisted key
-    // carries its real id, not the id of the pre-rename object.
-    const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0] ?? newNode;
-    const nextPinnedOrder = replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize);
+    // Never persist an Object Browser row id as a sidebar replacement. If a
+    // refreshed sidebar node is unavailable, replacement falls back to removing
+    // the old semantic pin (and any unresolved legacy key is tombstoned).
+    const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0];
+    const nextPinnedOrder = loadedReplacement ? replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize) : removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, [oldNode], canonicalize);
     if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
     setPinnedTreeNodeOrder(nextPinnedOrder);
     syncPinnedTreeState(treeNodes.value);
@@ -1895,7 +1897,11 @@ export const useConnectionStore = defineStore("connection", () => {
     // cannot continue matching objects in a different database. Newly pinned
     // nodes append to the persisted order, placing them last in their sibling
     // pin section until the user explicitly reorders them.
-    const next = pinnedTreeNodeOrder.value.filter((id) => id !== node.id && id !== pinKey);
+    const next = pinnedTreeNodeOrder.value.filter((id) => {
+      if (id === node.id || id === pinKey) return false;
+      const removedIdentity = parseRemovedTreeNodePinKey(id);
+      return !removedIdentity || !pinnedTreeNodeIdentityMatches(removedIdentity, treeNodePinIdentity(node));
+    });
     if (!wasPinned) next.push(pinKey);
     setPinnedTreeNodeOrder(next);
     persistPinnedTreeNodeIds();
